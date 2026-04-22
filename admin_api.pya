@@ -1,0 +1,79 @@
+from flask import Blueprint, render_template, request, jsonify, session, redirect
+import os
+import threading
+from database import fetch, execute
+from bot_core import bot
+
+admin = Blueprint("admin", __name__)
+ADMIN_USER = os.getenv("ADMIN_USERNAME")
+ADMIN_PASS = os.getenv("ADMIN_PASSWORD")
+
+def check_auth():
+    return session.get('logged_in') is True
+
+@admin.route('/', methods=['GET'])
+def root():
+    return redirect('/login')
+
+@admin.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        if request.form.get('user') == ADMIN_USER and request.form.get('pass') == ADMIN_PASS:
+            session['logged_in'] = True
+            return redirect('/dashboard')
+        return "❌ Access Denied."
+    return render_template('login.html')
+
+@admin.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect('/login')
+
+@admin.route('/dashboard')
+def dashboard():
+    if not check_auth(): return redirect('/login')
+    stats = {
+        'users': len(fetch("SELECT user_id FROM users")),
+        'groups': len(fetch("SELECT chat_id FROM groups")),
+        'queries': len(fetch("SELECT id FROM logs")),
+        'vip_count': len(fetch("SELECT user_id FROM users WHERE tier != 'free'"))
+    }
+    
+    users = fetch("SELECT * FROM users ORDER BY joined_at DESC LIMIT 20")
+    settings = {s['key']: s['value'] for s in fetch("SELECT * FROM settings")}
+    
+    return render_template('dashboard.html', stats=stats, users=users, s=settings)
+
+@admin.route('/api/update_setting', methods=['POST'])
+def api_settings():
+    if not check_auth(): return jsonify({'error': 'auth'}), 403
+    key, val = request.form['key'], request.form['value']
+    execute("UPDATE settings SET value=? WHERE key=?", (val, key))
+    return jsonify({"success": True})
+
+@admin.route('/api/action/user', methods=['POST'])
+def api_user():
+    if not check_auth(): return jsonify({'error': 'auth'}), 403
+    uid = request.form['uid']
+    act = request.form['action']
+    if act == 'ban':
+        execute("UPDATE users SET is_banned=1 WHERE user_id=?", (uid,))
+    elif act == 'unban':
+        execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
+    elif act == 'give_premium':
+        execute("UPDATE users SET tier='premium', limits=500 WHERE user_id=?", (uid,))
+    return jsonify({"success": True})
+
+@admin.route('/api/broadcast', methods=['POST'])
+def broadcast():
+    if not check_auth(): return jsonify({'error': 'auth'}), 403
+    text = request.form['msg']
+    
+    def async_send():
+        users = fetch("SELECT user_id FROM users")
+        for u in users:
+            try: bot.send_message(u['user_id'], text, parse_mode="Markdown")
+            except: pass
+            
+    threading.Thread(target=async_send).start()
+    return jsonify({"success": True, "msg": "Broadcast Initiated!"})
